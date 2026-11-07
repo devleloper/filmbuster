@@ -104,3 +104,11 @@ flutter_launcher_icons:
   adaptive_icon_background: "#141414"
   remove_alpha_ios: false
   background_color_ios: "#141414"
+  web:
+    generate: true
+    image_path: assets/brand/logo.png
+    background_color: "#141414"
+    theme_color: "#141414"
+  macos:
+    generate: true
+    image_path: assets/brand/logo.png

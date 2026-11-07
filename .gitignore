@@ -44,8 +44,10 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 
+# Vercel CLI project link and prebuilt output
+.vercel/
+
 # Environment files: real values stay local, the example is committed.
-# This file must stand alone: client/ becomes the root of the public repository.
 .env
 .env.*
 *.env

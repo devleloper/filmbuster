@@ -1,11 +1,11 @@
 {
-    "name": "filmbuster",
-    "short_name": "filmbuster",
+    "name": "Filmbuster",
+    "short_name": "Filmbuster",
     "start_url": ".",
     "display": "standalone",
-    "background_color": "#0175C2",
-    "theme_color": "#0175C2",
-    "description": "A new Flutter project.",
+    "background_color": "#141414",
+    "theme_color": "#141414",
+    "description": "Movie catalogue client that browses movie metadata and plays openly licensed films.",
     "orientation": "portrait-primary",
     "prefer_related_applications": false,
     "icons": [
