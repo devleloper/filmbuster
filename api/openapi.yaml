@@ -1,0 +1,1385 @@
+openapi: 3.1.0
+info:
+  title: Filmbuster API
+  version: 1.1.0
+  summary: TMDB metadata proxy and playback-source registry for the Filmbuster client (live mode).
+  description: |
+    Contract for the Filmbuster API v1: a TMDB metadata proxy and a playback-source registry.
+    It is the single source of truth: the Filmbuster server and any other server that
+    implements this contract are interchangeable, and the Flutter client consumes it in live
+    mode (`API_BASE_URL` set; an empty value means demo mode, which needs no server).
+
+    **1.1.0** (additive): `GET /api/v1/movies/{tmdbId}/sources`, schemas
+    `MovieSourceList`, `MovieSource`, `ContentLicense`, `SourceId`, and the problem slug
+    `sources-unavailable` (502). Nothing in 1.0.0 changed; 1.0.0 clients are unaffected.
+
+    Rules that apply to every operation:
+
+    - **Read-only.** Only `GET` (and CORS preflight `OPTIONS`). Any other method returns
+      `405` problem+json. Unknown paths return `404` problem+json.
+    - **Casing and nulls.** All fields are camelCase. Every documented field is always present;
+      a field without a value is `null`, never omitted. TMDB empty strings
+      (for example `release_date: ""`) become `null`.
+    - **Lists are objects.** List endpoints return an object (`MoviePage` or `PersonMovieList`),
+      never a bare JSON array.
+    - **Upstream failures are errors.** A TMDB failure is never `200` with an empty list;
+      it is a `5xx` problem+json. The same holds for playback sources: when every enabled
+      provider fails the answer is `502 sources-unavailable`, and a partly failed lookup says
+      so with `partial: true`.
+    - **Errors** are RFC 9457 `application/problem+json` (`Problem`). `detail` is short,
+      user-safe English and never contains upstream bodies, URLs or credentials.
+    - **Language** is fixed to `en-US`.
+    - **Images.** `posterPath`, `backdropPath` and `profilePath` are TMDB image paths
+      (for example `/abc123.jpg`). Clients build image URLs as
+      `https://image.tmdb.org/t/p/{size}{path}`; the backend does not proxy images.
+    - **Versioning.** `/api/v1` shapes may change until the first public release. After it,
+      changes are additive only; a breaking change requires `/api/v2`.
+
+    This product uses TMDB and the TMDB APIs but is not endorsed, certified, or otherwise
+    approved by TMDB.
+servers:
+  - url: http://localhost:8080
+    description: Local development (default listen port 8080). TLS terminates at the platform or reverse proxy.
+tags:
+  - name: health
+    description: Liveness and readiness.
+  - name: tmdb
+    description: TMDB metadata proxied and normalised by the server.
+  - name: sources
+    description: |
+      Playable, licensed sources for a movie, collected from the server's enabled providers.
+      The client never needs to know where a film comes from.
+paths:
+  /api/v1/healthz:
+    get:
+      tags: [health]
+      operationId: getHealth
+      summary: Liveness and readiness probe
+      description: |
+        v1 is stateless (no database), so liveness and readiness are the same
+        check: the process serves HTTP. The probe never calls TMDB, so an upstream outage does
+        not restart or de-route healthy instances. Exempt from the per-IP rate limit.
+        During graceful shutdown the listener stops accepting connections, so probes fail at
+        the TCP level rather than with an HTTP status.
+      parameters:
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The service is up and accepts traffic.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              examples:
+                healthy:
+                  value:
+                    status: healthy
+                    service: filmbuster-api
+                    version: 1.1.0
+                    timestamp: '2026-11-03T12:00:00Z'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /api/v1/tmdb/search:
+    get:
+      tags: [tmdb]
+      operationId: searchMovies
+      summary: Search movies by title
+      description: |
+        Proxies TMDB `GET /search/movie`. `q` is trimmed by the server; an empty result is
+        `200` with `results: []` and `totalPages: 0`. A page beyond `totalPages` returns `200`
+        with an empty `results`. Per-IP limit: `RATE_LIMIT_SEARCH_PER_MIN` (default 30/min).
+      parameters:
+        - name: q
+          in: query
+          required: true
+          description: Search text. Leading and trailing whitespace is ignored; after trimming it must contain 1–200 characters.
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 200
+          example: sintel
+        - name: year
+          in: query
+          required: false
+          description: Primary release year filter (TMDB `primary_release_year`).
+          schema:
+            type: integer
+            minimum: 1874
+            maximum: 2100
+          example: 2010
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: One page of matching movies.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-List'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MoviePage'
+              examples:
+                found:
+                  $ref: '#/components/examples/MoviePageSearch'
+                empty:
+                  $ref: '#/components/examples/MoviePageEmpty'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/UpstreamBusy'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /api/v1/tmdb/movie/{tmdbId}:
+    get:
+      tags: [tmdb]
+      operationId: getMovieDetails
+      summary: Movie details with credits, similar titles and official trailers
+      description: |
+        Proxies TMDB `GET /movie/{id}?append_to_response=credits,similar,videos` as one
+        upstream call. TMDB `404` maps to `404 not-found`.
+      parameters:
+        - $ref: '#/components/parameters/TmdbId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Movie details.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-Entity'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MovieDetails'
+              examples:
+                sintel:
+                  $ref: '#/components/examples/MovieDetailsSintel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/UpstreamBusy'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /api/v1/tmdb/person/{personId}:
+    get:
+      tags: [tmdb]
+      operationId: getPersonDetails
+      summary: Person details
+      description: Proxies TMDB `GET /person/{id}`. TMDB `404` maps to `404 not-found`.
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Person details.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-Entity'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonDetails'
+              examples:
+                person:
+                  value:
+                    id: 900001
+                    name: Jane Example
+                    profilePath: /example-profile.jpg
+                    biography: Example biography text.
+                    knownForDepartment: Acting
+                noProfile:
+                  summary: Missing optional values are null, not omitted
+                  value:
+                    id: 900002
+                    name: John Example
+                    profilePath: null
+                    biography: null
+                    knownForDepartment: null
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/UpstreamBusy'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /api/v1/tmdb/person/{personId}/movies:
+    get:
+      tags: [tmdb]
+      operationId: getPersonMovies
+      summary: Person filmography (movies only)
+      description: |
+        Proxies TMDB `GET /person/{id}/movie_credits`. Cast and crew credits are merged and
+        de-duplicated by movie `id`; a cast credit wins over a crew credit for the same movie
+        (then `character` is set and `job` is `null`; for crew-only movies the reverse).
+        Sorted by `releaseDate` descending (newest first); entries with `releaseDate: null`
+        come last. Not paginated. TMDB `404` maps to `404 not-found`.
+      parameters:
+        - $ref: '#/components/parameters/PersonId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: The person's movies.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-Entity'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PersonMovieList'
+              examples:
+                filmography:
+                  value:
+                    results:
+                      - id: 133701
+                        title: Tears of Steel
+                        posterPath: /example-tos-poster.jpg
+                        backdropPath: null
+                        voteAverage: 6.1
+                        releaseDate: '2012-09-26'
+                        overview: Example overview.
+                        genreIds: [878]
+                        character: null
+                        job: Director
+                      - id: 45745
+                        title: Sintel
+                        posterPath: /example-sintel-poster.jpg
+                        backdropPath: /example-sintel-backdrop.jpg
+                        voteAverage: 7.2
+                        releaseDate: '2010-09-30'
+                        overview: Example overview.
+                        genreIds: [16, 14]
+                        character: Sintel
+                        job: null
+                empty:
+                  value:
+                    results: []
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/UpstreamBusy'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /api/v1/tmdb/discover/popular:
+    get:
+      tags: [tmdb]
+      operationId: getPopularMovies
+      summary: Popular movies
+      description: Proxies TMDB `GET /movie/popular`.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          $ref: '#/components/responses/MoviePageOk'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/UpstreamBusy'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /api/v1/tmdb/discover/top-rated:
+    get:
+      tags: [tmdb]
+      operationId: getTopRatedMovies
+      summary: Top-rated movies
+      description: Proxies TMDB `GET /movie/top_rated`.
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          $ref: '#/components/responses/MoviePageOk'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/UpstreamBusy'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /api/v1/tmdb/trending/{timeWindow}:
+    get:
+      tags: [tmdb]
+      operationId: getTrendingMovies
+      summary: Trending movies
+      description: |
+        Proxies TMDB `GET /trending/movie/{time_window}`. An unknown `timeWindow` is `400`.
+      parameters:
+        - name: timeWindow
+          in: path
+          required: true
+          description: Trending window.
+          schema:
+            type: string
+            enum: [day, week]
+          example: day
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          $ref: '#/components/responses/MoviePageOk'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/UpstreamError'
+        '503':
+          $ref: '#/components/responses/UpstreamBusy'
+        '504':
+          $ref: '#/components/responses/UpstreamTimeout'
+
+  /api/v1/movies/{tmdbId}/sources:
+    get:
+      tags: [sources]
+      operationId: listMovieSources
+      summary: Playable sources for a movie from all enabled providers
+      description: |
+        Since 1.1.0. The server asks every enabled provider in parallel; each provider has its
+        own deadline (configurable by the operator; 2 s by default in the Filmbuster server).
+        The response never waits for a slow provider beyond that deadline.
+
+        - **Outcome.** At least one provider answered: `200`; `partial` is `true` when another
+          enabled provider failed or timed out. Every enabled provider failed: `502
+          sources-unavailable`. No provider is enabled, or no provider knows the movie: `200`
+          with `results: []` and `partial: false`.
+        - **No TMDB lookup.** The id is not checked against TMDB, so an id unknown to every
+          provider is `200` with an empty list, not `404`. The route does not consume the TMDB
+          budget and never returns the `upstream-*` problems.
+        - **Order.** Provider priority first, then each provider's own order (best first).
+          At most 20 items per provider and 50 per response; not paginated.
+        - **Validation.** The server drops (and logs) any item whose license is not on its
+          allowlist, whose `attribution` is empty, whose `mimeType` is not `video/*`, or whose
+          `direct` URL is not https. Dropped items do not set `partial`.
+        - **Not cacheable** (`no-store`): the set of providers and their URLs may change
+          between requests. Clients refetch when the movie screen opens.
+        - **Client rules.** Play `url` verbatim (never build or rewrite it). Ignore an item
+          whose `kind` is unknown to the client. Show `license.name`, `attribution` and
+          `sourcePageUrl` next to playback (CC BY requires credit).
+      parameters:
+        - $ref: '#/components/parameters/TmdbId'
+        - $ref: '#/components/parameters/RequestId'
+      responses:
+        '200':
+          description: Sources in priority order; may be empty.
+          headers:
+            X-Request-Id:
+              $ref: '#/components/headers/X-Request-Id'
+            Cache-Control:
+              $ref: '#/components/headers/Cache-Control-NoStore'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MovieSourceList'
+              examples:
+                openMovie:
+                  $ref: '#/components/examples/MovieSourceListSintel'
+                partial:
+                  $ref: '#/components/examples/MovieSourceListPartial'
+                none:
+                  $ref: '#/components/examples/MovieSourceListEmpty'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '405':
+          $ref: '#/components/responses/MethodNotAllowed'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '500':
+          $ref: '#/components/responses/InternalError'
+        '502':
+          $ref: '#/components/responses/SourcesUnavailable'
+
+components:
+  parameters:
+    TmdbId:
+      name: tmdbId
+      in: path
+      required: true
+      description: TMDB movie id. A non-integer, zero, negative or out-of-range value is `400 invalid-parameter`.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 2147483647
+      example: 45745
+    PersonId:
+      name: personId
+      in: path
+      required: true
+      description: TMDB person id. A non-integer, zero, negative or out-of-range value is `400 invalid-parameter`.
+      schema:
+        type: integer
+        format: int32
+        minimum: 1
+        maximum: 2147483647
+      example: 900001
+    Page:
+      name: page
+      in: query
+      required: false
+      description: 1-based page number (TMDB caps pagination at 500). An invalid value is `400 invalid-parameter`.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 1
+      example: 1
+    RequestId:
+      name: X-Request-Id
+      in: header
+      required: false
+      description: |
+        Optional caller-supplied request id. A value that does not match the pattern is
+        ignored and replaced by a server-generated id. The effective id is echoed in the
+        `X-Request-Id` response header and in `Problem.requestId`.
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,64}$'
+
+  headers:
+    X-Request-Id:
+      description: Effective request id (caller-supplied if valid, otherwise generated).
+      required: true
+      schema:
+        type: string
+        pattern: '^[A-Za-z0-9._-]{1,64}$'
+    Cache-Control-List:
+      description: Lists may be cached by the client for 5 minutes.
+      required: true
+      schema:
+        type: string
+        const: public, max-age=300
+    Cache-Control-Entity:
+      description: Movie and person resources may be cached by the client for 1 hour.
+      required: true
+      schema:
+        type: string
+        const: public, max-age=3600
+    Cache-Control-NoStore:
+      description: Errors, probes and source lists are not cacheable.
+      required: true
+      schema:
+        type: string
+        const: no-store
+    Retry-After:
+      description: Seconds to wait before retrying (RFC 9110 delay-seconds form).
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status, service, version, timestamp]
+      properties:
+        status:
+          type: string
+          const: healthy
+        service:
+          type: string
+          const: filmbuster-api
+        version:
+          description: Contract version the server implements (`info.version`).
+          type: string
+        timestamp:
+          description: Server time, RFC 3339 UTC.
+          type: string
+          format: date-time
+
+    MovieSummary:
+      description: |
+        The single movie card shape (client `TmdbMovie`). Used by `MoviePage.results`,
+        `MovieDetails.similar` and, extended, by `PersonMovieCredit`.
+      type: object
+      required: [id, title, posterPath, backdropPath, voteAverage, releaseDate, overview, genreIds]
+      properties:
+        id:
+          description: TMDB movie id.
+          type: integer
+          format: int32
+          minimum: 1
+        title:
+          description: TMDB `title`, falling back to `original_title`; never empty.
+          type: string
+          minLength: 1
+        posterPath:
+          $ref: '#/components/schemas/ImagePath'
+        backdropPath:
+          $ref: '#/components/schemas/ImagePath'
+        voteAverage:
+          description: TMDB vote average, 0–10.
+          type: number
+          minimum: 0
+          maximum: 10
+        releaseDate:
+          $ref: '#/components/schemas/NullableDate'
+        overview:
+          description: Plot summary; TMDB empty string becomes `null`.
+          type: [string, 'null']
+        genreIds:
+          description: TMDB genre ids; `[]` when unknown.
+          type: array
+          items:
+            type: integer
+
+    MoviePage:
+      description: One page of movies. Used by search, popular, top-rated and trending.
+      type: object
+      additionalProperties: false
+      required: [page, totalPages, results]
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          maximum: 500
+        totalPages:
+          description: TMDB `total_pages`, capped at 500; `0` when nothing matched.
+          type: integer
+          minimum: 0
+          maximum: 500
+        results:
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/MovieSummary'
+
+    MovieDetails:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - title
+        - originalTitle
+        - overview
+        - releaseDate
+        - voteAverage
+        - voteCount
+        - posterPath
+        - backdropPath
+        - genres
+        - runtime
+        - credits
+        - similar
+        - trailers
+      properties:
+        id:
+          type: integer
+          format: int32
+          minimum: 1
+        title:
+          description: TMDB `title`, falling back to `original_title`; never empty.
+          type: string
+          minLength: 1
+        originalTitle:
+          type: [string, 'null']
+        overview:
+          type: [string, 'null']
+        releaseDate:
+          $ref: '#/components/schemas/NullableDate'
+        voteAverage:
+          type: number
+          minimum: 0
+          maximum: 10
+        voteCount:
+          type: integer
+          minimum: 0
+        posterPath:
+          $ref: '#/components/schemas/ImagePath'
+        backdropPath:
+          $ref: '#/components/schemas/ImagePath'
+        genres:
+          description: Genre names in TMDB order.
+          type: array
+          items:
+            type: string
+        runtime:
+          description: Runtime in minutes; TMDB `0` or missing becomes `null`.
+          type: [integer, 'null']
+          minimum: 1
+        credits:
+          $ref: '#/components/schemas/Credits'
+        similar:
+          description: First page of TMDB similar movies; `[]` when none.
+          type: array
+          maxItems: 20
+          items:
+            $ref: '#/components/schemas/MovieSummary'
+        trailers:
+          description: |
+            Official trailers as external links; the server does not proxy video. From TMDB
+            `videos`: only `official: true` items with `type` Trailer or Teaser on YouTube or
+            Vimeo; Trailer before Teaser, newest first, at most 3. Always present; `[]` when
+            none.
+          type: array
+          maxItems: 3
+          items:
+            $ref: '#/components/schemas/Trailer'
+
+    Credits:
+      type: object
+      additionalProperties: false
+      required: [cast, crew]
+      properties:
+        cast:
+          description: Cast in TMDB billing order (`order` ascending).
+          type: array
+          items:
+            $ref: '#/components/schemas/CreditPerson'
+        crew:
+          type: array
+          items:
+            $ref: '#/components/schemas/CreditPerson'
+
+    CreditPerson:
+      description: |
+        A cast or crew credit (client `TmdbCreditPerson`). Cast entries have `character` and
+        `order` and `job: null`, `department: null`; crew entries have `job` and
+        `department` and `character: null`, `order: null`.
+      type: object
+      additionalProperties: false
+      required: [id, name, profilePath, character, job, department, order]
+      properties:
+        id:
+          description: TMDB person id.
+          type: integer
+          format: int32
+          minimum: 1
+        name:
+          type: string
+        profilePath:
+          $ref: '#/components/schemas/ImagePath'
+        character:
+          type: [string, 'null']
+        job:
+          type: [string, 'null']
+        department:
+          type: [string, 'null']
+        order:
+          type: [integer, 'null']
+          minimum: 0
+
+    Trailer:
+      type: object
+      additionalProperties: false
+      required: [name, site, key, url, type, publishedAt]
+      properties:
+        name:
+          type: string
+        site:
+          type: string
+          enum: [YouTube, Vimeo]
+        key:
+          description: TMDB video key (YouTube or Vimeo id).
+          type: string
+          pattern: '^[A-Za-z0-9_-]{1,64}$'
+        url:
+          description: |
+            Watch URL built by the server from `site` and `key`:
+            `https://www.youtube.com/watch?v={key}` or `https://vimeo.com/{key}`.
+          type: string
+          format: uri
+          pattern: '^https://(www\.youtube\.com/watch\?v=|vimeo\.com/)[A-Za-z0-9_-]{1,64}$'
+        type:
+          type: string
+          enum: [Trailer, Teaser]
+        publishedAt:
+          description: TMDB `published_at`, RFC 3339; `null` when TMDB omits it.
+          type: [string, 'null']
+          format: date-time
+
+    PersonDetails:
+      description: Client `TmdbPersonDetails`.
+      type: object
+      additionalProperties: false
+      required: [id, name, profilePath, biography, knownForDepartment]
+      properties:
+        id:
+          type: integer
+          format: int32
+          minimum: 1
+        name:
+          type: string
+        profilePath:
+          $ref: '#/components/schemas/ImagePath'
+        biography:
+          description: TMDB empty string becomes `null`.
+          type: [string, 'null']
+        knownForDepartment:
+          type: [string, 'null']
+
+    PersonMovieCredit:
+      description: A `MovieSummary` plus the person's role in that movie.
+      allOf:
+        - $ref: '#/components/schemas/MovieSummary'
+        - type: object
+          required: [character, job]
+          properties:
+            character:
+              description: Role name when the person is credited as cast, otherwise `null`.
+              type: [string, 'null']
+            job:
+              description: Crew job when the movie has only a crew credit, otherwise `null`.
+              type: [string, 'null']
+
+    PersonMovieList:
+      type: object
+      additionalProperties: false
+      required: [results]
+      properties:
+        results:
+          type: array
+          items:
+            $ref: '#/components/schemas/PersonMovieCredit'
+
+    MovieSourceList:
+      description: Since 1.1.0. Playable sources of one movie (client `MovieSourceList`).
+      type: object
+      additionalProperties: false
+      required: [tmdbId, partial, results]
+      properties:
+        tmdbId:
+          description: The requested TMDB movie id, echoed.
+          type: integer
+          format: int32
+          minimum: 1
+        partial:
+          description: |
+            `true` when at least one enabled provider failed or timed out while at least one
+            other answered, so `results` may be incomplete. Clients may offer a retry when
+            `partial` is `true` and `results` is empty.
+          type: boolean
+        results:
+          description: Sources in priority order (provider priority, then the provider's own order).
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/MovieSource'
+
+    MovieSource:
+      description: |
+        Since 1.1.0. One playable source (client `MovieSource`). Fields without a value are
+        `null`, never omitted. A `direct` source always has an https `url`.
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - provider
+        - providerName
+        - kind
+        - url
+        - quality
+        - sizeBytes
+        - mimeType
+        - codecs
+        - license
+        - attribution
+        - sourcePageUrl
+      properties:
+        id:
+          $ref: '#/components/schemas/SourceId'
+        provider:
+          description: Opaque machine id of the provider (for example `openmovies`). Clients must not branch on it.
+          type: string
+          pattern: '^[a-z][a-z0-9]{1,23}$'
+        providerName:
+          description: Display label of the provider (for example `Open movies`).
+          type: string
+          minLength: 1
+          maxLength: 40
+        kind:
+          description: |
+            How the bytes are delivered, not where the film comes from. `direct`: a third-party
+            https URL played as is. `stream`: served by this server with HTTP Range support
+            (no 1.1.0 provider returns it yet). New kinds may be added in a minor version;
+            clients ignore items with a kind they do not know.
+          type: string
+          enum: [direct, stream]
+        url:
+          description: Absolute playback URL. Clients use it verbatim, including any query string.
+          type: string
+          format: uri
+          pattern: '^https?://'
+        quality:
+          description: Short display label of the rendition.
+          type: string
+          minLength: 1
+          maxLength: 16
+          examples: ['1080p', '720p', 'Original']
+        sizeBytes:
+          description: File size in bytes; `null` when unknown.
+          type: [integer, 'null']
+          format: int64
+          minimum: 1
+        mimeType:
+          description: Container media type, always `video/*`.
+          type: string
+          pattern: '^video/[a-z0-9.+-]+$'
+          examples: ['video/mp4', 'video/webm', 'video/x-matroska']
+        codecs:
+          description: RFC 6381 codecs, for example `avc1.640028, mp4a.40.2`; `null` when unknown.
+          type: [string, 'null']
+          maxLength: 128
+        license:
+          $ref: '#/components/schemas/ContentLicense'
+        attribution:
+          description: Credit line required by the license, shown next to playback.
+          type: string
+          minLength: 1
+          maxLength: 300
+        sourcePageUrl:
+          description: Official page of the work; `null` when there is none.
+          type: [string, 'null']
+          format: uri
+          pattern: '^https://'
+      if:
+        required: [kind]
+        properties:
+          kind:
+            const: direct
+      then:
+        properties:
+          url:
+            pattern: '^https://'
+
+    SourceId:
+      description: |
+        Public source id `<provider>.<localId>`. Opaque to clients: stable for the same item of
+        the same provider, unique within a response, never a path, hash or infohash.
+      type: string
+      pattern: '^[a-z][a-z0-9]{1,23}\.[A-Za-z0-9_-]{1,64}$'
+
+    ContentLicense:
+      description: |
+        License of the work (the same shape as in the client's demo catalogue). The server
+        returns only licenses on its allowlist, which is narrower than `spdxId`'s pattern.
+      type: object
+      additionalProperties: false
+      required: [spdxId, name, url]
+      properties:
+        spdxId:
+          description: SPDX id (for example `CC-BY-3.0`), or `LicenseRef-*` for public domain and own work.
+          type: string
+          pattern: '^(CC0-1\.0|CC-BY(-SA)?-[1-4]\.[05]|LicenseRef-[A-Za-z0-9.-]{1,40})$'
+        name:
+          description: Display name, for example `CC BY 3.0`.
+          type: string
+          minLength: 1
+          maxLength: 60
+        url:
+          description: License text URL; `null` when there is none (for example public domain).
+          type: [string, 'null']
+          format: uri
+
+    ImagePath:
+      description: TMDB image path (starts with `/`), or `null` when TMDB has no image.
+      type: [string, 'null']
+      pattern: '^/[^/?#]+$'
+
+    NullableDate:
+      description: ISO 8601 calendar date `YYYY-MM-DD`; TMDB empty string becomes `null`.
+      type: [string, 'null']
+      format: date
+      pattern: '^\d{4}-\d{2}-\d{2}$'
+
+    Problem:
+      description: |
+        RFC 9457 problem details. Additional members may be added later; clients must ignore
+        unknown members. Clients show `detail` to the user.
+      type: object
+      required: [type, title, status, detail, requestId]
+      properties:
+        type:
+          description: |
+            `urn:filmbuster:problem:<slug>`, or `about:blank` for an unexpected internal error.
+            v1 slugs: `invalid-parameter` (400), `not-found` (404), `method-not-allowed` (405),
+            `rate-limited` (429), `upstream-error` (502), `upstream-busy` (503),
+            `upstream-timeout` (504); since 1.1.0 `sources-unavailable` (502). New slugs may be
+            added; clients branch on `status`.
+          type: string
+          pattern: '^(urn:filmbuster:problem:[a-z0-9-]+|about:blank)$'
+        title:
+          description: Short summary of the problem type (HTTP reason phrase).
+          type: string
+        status:
+          description: Same as the HTTP status code.
+          type: integer
+          minimum: 400
+          maximum: 599
+        detail:
+          description: Short, user-safe English explanation of this occurrence.
+          type: string
+          maxLength: 200
+        requestId:
+          description: Same value as the `X-Request-Id` response header.
+          type: string
+          pattern: '^[A-Za-z0-9._-]{1,64}$'
+        invalidParams:
+          description: Present only on `invalid-parameter`; names and reasons of rejected parameters.
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required: [name, reason]
+            properties:
+              name:
+                type: string
+              reason:
+                type: string
+
+  responses:
+    MoviePageOk:
+      description: One page of movies.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-List'
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/MoviePage'
+          examples:
+            page:
+              $ref: '#/components/examples/MoviePageList'
+
+    BadRequest:
+      description: A path or query parameter is missing, malformed or out of range.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            invalidPage:
+              value:
+                type: urn:filmbuster:problem:invalid-parameter
+                title: Bad Request
+                status: 400
+                detail: Parameter "page" must be an integer between 1 and 500.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VB
+                invalidParams:
+                  - name: page
+                    reason: must be an integer between 1 and 500
+
+    NotFound:
+      description: Unknown route, or TMDB has no such movie or person.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            notFound:
+              value:
+                type: urn:filmbuster:problem:not-found
+                title: Not Found
+                status: 404
+                detail: The requested resource was not found.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VC
+
+    MethodNotAllowed:
+      description: The path exists but only supports `GET`.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Allow:
+          description: Methods supported by the path (`GET`; `OPTIONS` is handled only as a CORS preflight).
+          required: true
+          schema:
+            type: string
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            methodNotAllowed:
+              value:
+                type: urn:filmbuster:problem:method-not-allowed
+                title: Method Not Allowed
+                status: 405
+                detail: Only GET is supported.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VD
+
+    TooManyRequests:
+      description: >-
+        Inbound per-IP rate limit exceeded: one `RATE_LIMIT_PER_MIN` budget shared by every route
+        except `/healthz`, plus `RATE_LIMIT_SEARCH_PER_MIN` for search.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            rateLimited:
+              value:
+                type: urn:filmbuster:problem:rate-limited
+                title: Too Many Requests
+                status: 429
+                detail: Too many requests. Please try again shortly.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VE
+
+    InternalError:
+      description: Unexpected server error (recovered panic). No internal details are exposed.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            internal:
+              value:
+                type: about:blank
+                title: Internal Server Error
+                status: 500
+                detail: Something went wrong. Please try again later.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VF
+
+    UpstreamError:
+      description: TMDB answered 401/403/5xx, sent an undecodable body, or the network failed.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            upstreamError:
+              value:
+                type: urn:filmbuster:problem:upstream-error
+                title: Bad Gateway
+                status: 502
+                detail: The movie database is unavailable. Please try again later.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VG
+
+    UpstreamBusy:
+      description: TMDB answered 429, or the server's outbound TMDB budget is exhausted.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Retry-After:
+          $ref: '#/components/headers/Retry-After'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            upstreamBusy:
+              value:
+                type: urn:filmbuster:problem:upstream-busy
+                title: Service Unavailable
+                status: 503
+                detail: The movie database is busy. Please try again shortly.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VH
+
+    UpstreamTimeout:
+      description: TMDB did not answer within the server's outbound deadline.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            upstreamTimeout:
+              value:
+                type: urn:filmbuster:problem:upstream-timeout
+                title: Gateway Timeout
+                status: 504
+                detail: The movie database took too long to respond.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VJ
+
+    SourcesUnavailable:
+      description: Since 1.1.0. Every enabled source provider failed or timed out.
+      headers:
+        X-Request-Id:
+          $ref: '#/components/headers/X-Request-Id'
+        Cache-Control:
+          $ref: '#/components/headers/Cache-Control-NoStore'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            sourcesUnavailable:
+              value:
+                type: urn:filmbuster:problem:sources-unavailable
+                title: Bad Gateway
+                status: 502
+                detail: Playback sources are unavailable. Please try again later.
+                requestId: 01JBX7Q4M2W8Z6K3N5P9R1T0VK
+
+  examples:
+    MoviePageList:
+      summary: A page of movies
+      value:
+        page: 1
+        totalPages: 500
+        results:
+          - id: 10378
+            title: Big Buck Bunny
+            posterPath: /example-bbb-poster.jpg
+            backdropPath: /example-bbb-backdrop.jpg
+            voteAverage: 6.5
+            releaseDate: '2008-05-30'
+            overview: Example overview.
+            genreIds: [16, 35]
+          - id: 900003
+            title: Untitled Example
+            posterPath: null
+            backdropPath: null
+            voteAverage: 0
+            releaseDate: null
+            overview: null
+            genreIds: []
+    MoviePageSearch:
+      summary: Search hits
+      value:
+        page: 1
+        totalPages: 1
+        results:
+          - id: 45745
+            title: Sintel
+            posterPath: /example-sintel-poster.jpg
+            backdropPath: /example-sintel-backdrop.jpg
+            voteAverage: 7.2
+            releaseDate: '2010-09-30'
+            overview: Example overview.
+            genreIds: [16, 14]
+    MoviePageEmpty:
+      summary: Nothing matched (still 200, not an error)
+      value:
+        page: 1
+        totalPages: 0
+        results: []
+    MovieDetailsSintel:
+      summary: Movie with credits, similar titles and a trailer
+      value:
+        id: 45745
+        title: Sintel
+        originalTitle: Sintel
+        overview: Example overview.
+        releaseDate: '2010-09-30'
+        voteAverage: 7.2
+        voteCount: 1000
+        posterPath: /example-sintel-poster.jpg
+        backdropPath: /example-sintel-backdrop.jpg
+        genres: [Animation, Fantasy]
+        runtime: 15
+        credits:
+          cast:
+            - id: 900001
+              name: Jane Example
+              profilePath: /example-profile.jpg
+              character: Sintel
+              job: null
+              department: null
+              order: 0
+          crew:
+            - id: 900002
+              name: John Example
+              profilePath: null
+              character: null
+              job: Director
+              department: Directing
+              order: null
+        similar:
+          - id: 10378
+            title: Big Buck Bunny
+            posterPath: /example-bbb-poster.jpg
+            backdropPath: null
+            voteAverage: 6.5
+            releaseDate: '2008-05-30'
+            overview: Example overview.
+            genreIds: [16, 35]
+        trailers:
+          - name: Official Trailer
+            site: YouTube
+            key: exampleKey01
+            url: https://www.youtube.com/watch?v=exampleKey01
+            type: Trailer
+            publishedAt: '2010-09-27T10:00:00Z'
+    MovieSourceListSintel:
+      summary: An open movie from the OpenMovies provider (Sintel, CC BY 3.0)
+      value:
+        tmdbId: 45745
+        partial: false
+        results:
+          - id: openmovies.sintel-818p
+            provider: openmovies
+            providerName: Open movies
+            kind: direct
+            url: https://video.blender.org/object-storage/web_videos/0eb052d0-fd51-43e6-aa33-ecdbf77a5d40-818.mp4
+            quality: 818p
+            sizeBytes: 239096915
+            mimeType: video/mp4
+            codecs: avc1.64001F,mp4a.40.2
+            license:
+              spdxId: CC-BY-3.0
+              name: CC BY 3.0
+              url: https://creativecommons.org/licenses/by/3.0/
+            attribution: © copyright Blender Foundation | durian.blender.org
+            sourcePageUrl: https://durian.blender.org/about/
+          - id: openmovies.sintel-480p
+            provider: openmovies
+            providerName: Open movies
+            kind: direct
+            url: https://video.blender.org/object-storage/web_videos/0eb052d0-fd51-43e6-aa33-ecdbf77a5d40-480.mp4
+            quality: 480p
+            sizeBytes: 119976502
+            mimeType: video/mp4
+            codecs: avc1.64001F,mp4a.40.2
+            license:
+              spdxId: CC-BY-3.0
+              name: CC BY 3.0
+              url: https://creativecommons.org/licenses/by/3.0/
+            attribution: © copyright Blender Foundation | durian.blender.org
+            sourcePageUrl: https://durian.blender.org/about/
+          - id: openmovies.sintel-360p
+            provider: openmovies
+            providerName: Open movies
+            kind: direct
+            url: https://video.blender.org/object-storage/web_videos/0eb052d0-fd51-43e6-aa33-ecdbf77a5d40-360.mp4
+            quality: 360p
+            sizeBytes: 83747601
+            mimeType: video/mp4
+            codecs: avc1.64001F,mp4a.40.2
+            license:
+              spdxId: CC-BY-3.0
+              name: CC BY 3.0
+              url: https://creativecommons.org/licenses/by/3.0/
+            attribution: © copyright Blender Foundation | durian.blender.org
+            sourcePageUrl: https://durian.blender.org/about/
+    MovieSourceListPartial:
+      summary: One provider timed out, another answered (still 200)
+      value:
+        tmdbId: 900004
+        partial: true
+        results:
+          - id: example.item-01
+            provider: example
+            providerName: Example provider
+            kind: direct
+            url: https://media.example.org/films/item-01.mp4
+            quality: 720p
+            sizeBytes: null
+            mimeType: video/mp4
+            codecs: avc1.64001f, mp4a.40.2
+            license:
+              spdxId: LicenseRef-PublicDomain
+              name: Public domain
+              url: null
+            attribution: Example Studio (public domain)
+            sourcePageUrl: null
+    MovieSourceListEmpty:
+      summary: No enabled provider has the movie (200, not 404)
+      value:
+        tmdbId: 900003
+        partial: false
+        results: []

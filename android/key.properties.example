@@ -1,0 +1,10 @@
+# Release signing for the Android app.
+# Copy to android/key.properties (git-ignored) and fill in your own values.
+# Never commit key.properties or the keystore file.
+# storeFile is resolved relative to the android/ directory; an absolute path also works.
+# Without key.properties, release builds are signed with the debug key and are
+# only suitable for local `flutter run --release`.
+storePassword=<store-password>
+keyPassword=<key-password>
+keyAlias=upload
+storeFile=<path/to/upload-keystore.jks>

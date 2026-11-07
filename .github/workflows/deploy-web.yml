@@ -1,0 +1,98 @@
+# Deploys the demo web build of main to Vercel production.
+# The site is built here and uploaded prebuilt: Vercel never builds the source.
+# vercel.json supplies the SPA rewrite, the security headers (CSP) and the
+# build settings that `vercel build` uses.
+# Secrets live in the `production` environment: VERCEL_TOKEN, VERCEL_ORG_ID,
+# VERCEL_PROJECT_ID.
+name: deploy-web
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.url }}
+    env:
+      VERCEL_CLI_VERSION: 65.11.0
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2.23.0
+        with:
+          flutter-version: 3.47.9
+          channel: stable
+          cache: true
+
+      # Demo build: no API_BASE_URL is passed, so the app needs no backend.
+      - name: Client checks and demo web build
+        run: tool/ci.sh --build-web
+
+      # The CSP allows inline scripts by hash only. Fail before deploying if
+      # web/index.html changed and vercel.json was not updated.
+      - name: Check CSP hashes of inline scripts
+        run: |
+          python3 - <<'EOF'
+          import base64, hashlib, json, re, sys
+          html = open("build/web/index.html", encoding="utf-8").read()
+          csp = next(
+              h["value"]
+              for rule in json.load(open("vercel.json", encoding="utf-8"))["headers"]
+              for h in rule["headers"]
+              if h["key"] == "Content-Security-Policy"
+          )
+          missing = []
+          for attrs, body in re.findall(r"<script([^>]*)>(.*?)</script>", html, re.S):
+              if "src=" in attrs:
+                  continue
+              digest = base64.b64encode(hashlib.sha256(body.encode()).digest()).decode()
+              if f"'sha256-{digest}'" not in csp:
+                  missing.append(f"'sha256-{digest}'")
+          if missing:
+              print("vercel.json CSP misses inline script hashes:", *missing)
+              sys.exit(1)
+          print("CSP covers every inline script")
+          EOF
+
+      - name: Install Vercel CLI
+        run: npm install --global "vercel@${VERCEL_CLI_VERSION}"
+
+      - name: Pull Vercel project settings
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel pull --yes --environment=production --token="$VERCEL_TOKEN"
+
+      - name: Assemble the prebuilt output
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: vercel build --prod --token="$VERCEL_TOKEN"
+
+      - name: Check the prebuilt output
+        run: |
+          test -f .vercel/output/static/index.html
+          test -f .vercel/output/static/main.dart.js
+          grep -q 'Content-Security-Policy' .vercel/output/config.json
+
+      - name: Deploy to production
+        id: deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          url="$(vercel deploy --prebuilt --prod --token="$VERCEL_TOKEN")"
+          echo "url=${url}" >> "$GITHUB_OUTPUT"

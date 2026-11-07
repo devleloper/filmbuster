@@ -1,0 +1,79 @@
+name: Bug report
+description: Something in the app does not work as expected.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Do not include personal data, tokens, API keys
+        or private server addresses anywhere in this form. Security problems
+        go to the private report (Security tab), not here.
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: A short description of the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open ...
+        2. Tap ...
+        3. See ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Android
+        - iOS
+        - macOS
+        - Web
+    validations:
+      required: true
+  - type: input
+    id: platform-version
+    attributes:
+      label: OS or browser version
+      placeholder: e.g. Android 16, iOS 27.2, Chrome 140
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Mode
+      options:
+        - Demo (no API_BASE_URL)
+        - Live (own backend)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: App version or commit
+      placeholder: e.g. 1.0.0 or a commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: flutter
+    attributes:
+      label: Flutter version (if you built the app yourself)
+      description: Output of `flutter --version`.
+      render: text
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      description: Remove tokens, keys, server addresses and personal data first.
+      render: text

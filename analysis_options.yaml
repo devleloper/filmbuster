@@ -1,0 +1,42 @@
+# Static analysis configuration for the Filmbuster client.
+#
+# Rules are chosen for correctness and maintainability. Purely cosmetic rules
+# (import ordering, trailing commas, quote style) are deliberately left out:
+# `dart format` already normalizes layout, and enabling them would bury real
+# findings under thousands of style diffs.
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+    - ios/**
+    - web/**
+    - macos/**
+  language:
+    strict-casts: true
+    strict-raw-types: true
+
+linter:
+  rules:
+    # ── Correctness ────────────────────────────────────────────────────────
+    - always_declare_return_types
+    - avoid_dynamic_calls
+    - avoid_print
+    - avoid_slow_async_io
+    - cancel_subscriptions
+    - close_sinks
+    - throw_in_finally
+    - unawaited_futures
+    - unnecessary_null_checks
+    - test_types_in_equals
+
+    # ── Maintainability ────────────────────────────────────────────────────
+    - prefer_final_locals
+    - prefer_const_constructors
+    - prefer_const_constructors_in_immutables
+    - prefer_const_declarations
+    - prefer_const_literals_to_create_immutables
+    - unnecessary_lambdas
+    - unnecessary_parenthesis
+    - use_super_parameters
