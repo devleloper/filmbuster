@@ -15,10 +15,10 @@ dependencies:
   cached_network_image: ^3.3.1
   shimmer: ^3.0.0
   flutter_animate: ^4.5.0
-  carousel_slider: ^5.0.0
+  carousel_slider: ^5.1.2
   smooth_page_indicator: ^1.2.0
-  lottie: ^3.3.2
-  flutter_svg: ^2.0.10
+  lottie: ^3.8.2
+  flutter_svg: ^2.3.2
   
   # State Management
   bloc: ^8.1.3
@@ -26,7 +26,7 @@ dependencies:
   equatable: ^2.0.5
   
   # Networking
-  dio: ^5.4.0
+  dio: ^5.11.1
   
   # Configuration
   flutter_native_splash: ^2.4.8
@@ -48,11 +48,11 @@ dependencies:
 
   # VR Cinema Mode (3 DoF head tracking)
   sensors_plus: ^7.1.1
-  vector_math: ^2.1.4
-  wakelock_plus: ^1.2.8
+  vector_math: ^2.4.4
+  wakelock_plus: ^1.8.2
 
   # VR Spatial Scene (camera passthrough)
-  camera: ^0.11.3+1
+  camera: ^0.12.2
   permission_handler: ^13.0.2
 
   # External links: trailers, licenses, credits (BSD-3-Clause)
@@ -66,7 +66,7 @@ dev_dependencies:
   flutter_launcher_icons: ^0.14.4
 
   # Testing
-  mocktail: ^1.0.1
+  mocktail: ^1.0.5
   bloc_test: ^9.1.7
   url_launcher_platform_interface: ^2.3.2
   camera_platform_interface: ^2.12.0
