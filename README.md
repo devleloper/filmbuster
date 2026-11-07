@@ -59,8 +59,9 @@ flutter run --dart-define-from-file=.env
 - The Android emulator reaches the host machine at `10.0.2.2`, not
   `localhost`.
 - A live **web** build also needs the app's origin in the backend's CORS
-  allowlist and the backend origin in the `connect-src` directive of
-  `vercel.json` (or of your own hosting's Content Security Policy).
+  allowlist, the backend origin in the `connect-src` directive of
+  `vercel.json` (or of your own hosting's Content Security Policy), and every
+  video host your backend streams from in `media-src`.
 - The backend contract is OpenAPI 3.1, Filmbuster API version 1.1.0:
   [`api/openapi.yaml`](api/openapi.yaml). Any server that implements it works
   with the client in live mode.

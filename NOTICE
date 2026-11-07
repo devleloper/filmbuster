@@ -32,8 +32,11 @@ Section 3 of those terms requires the notice above to appear prominently in
 the application, together with a TMDB logo that is less prominent than the
 Filmbuster logo. Approved TMDB logos: https://www.themoviedb.org/about/logos-attribution
 
-File:      assets/brand/tmdb_logo.svg (official TMDB logo, variant blue_short,
-           from the page above, unmodified)
+Files:     assets/brand/tmdb_logo.svg (official TMDB logo, variant blue_short,
+           from the page above, unmodified; kept as the reference copy)
+           assets/brand/tmdb_logo_inline.svg (bundled with the app: the same
+           official blue_short logo with its CSS gradient written as SVG
+           attributes so that the SVG renderer can draw it; no visual change)
 
 TMDB names and logos are trademarks of TMDB and are not covered by this
 project's license; their use does not imply any endorsement, certification,
@@ -150,8 +153,8 @@ LGPL 3.0 with the GNU GPL 3.0 it builds on, BSD-2-Clause (dav1d), ISC
 (Mbed TLS), the FreeType License and the libpng license (libpng-2.0), as well
 as the SIL Open Font License for Poppins. They are registered with Flutter's
 LicenseRegistry in lib/core/licenses/ (called from lib/main.dart). The app's
-About > Licenses screen, which is in development, will show them together with
-the licenses of the Dart and Flutter packages. Web builds register only the
+About > Open-source licenses screen shows them together with the licenses of
+the Dart and Flutter packages. Web builds register only the
 Poppins license, because they contain no native media libraries. Online
 copies:
 https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html,
@@ -181,8 +184,8 @@ image are trademarks of devleloper. All rights reserved. They are not covered
 by the MIT License that applies to the source code. Forks and redistributed
 modified versions must replace them with their own name and logo.
 
-(assets/brand/tmdb_logo.svg is a TMDB mark, not a Filmbuster brand asset; see
-section 2.)
+(assets/brand/tmdb_logo.svg and tmdb_logo_inline.svg are TMDB marks, not
+Filmbuster brand assets; see section 2.)
 
 -------------------------------------------------------------------------------
 6. Dart and Flutter packages
